@@ -1,0 +1,3 @@
+[submodule "gomsvc"]
+	path = gomsvc
+	url = https://github.com/sandrolain/gomsvc.git
