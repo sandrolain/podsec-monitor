@@ -1,0 +1,23 @@
+version: "3"
+
+tasks:
+  build-image:
+    cmds:
+      - docker build -t "podsec:latest" -f "./.Dockerfile" .
+      - docker image prune -f
+      - docker volume prune -f
+
+  deploy-k8s:
+    cmds:
+      - kubectl apply -f "./k8s/resources.yml"
+
+  undeploy-k8s:
+    cmds:
+      - kubectl delete -f "./k8s/resources.yml"
+
+  run:
+    env:
+      WORKDIR_PATH: ./out
+      NAMESPACES: mongodb
+    cmds:
+      - go run ./src
