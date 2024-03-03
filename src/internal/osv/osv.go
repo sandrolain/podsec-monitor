@@ -6,11 +6,11 @@ import (
 	"os/exec"
 
 	"github.com/sandrolain/gomsvc/pkg/devlib"
-	"github.com/sandrolain/podsec-monitor/src/internal/git"
+	"github.com/sandrolain/gomsvc/pkg/gitlib"
 )
 
-func AnalyzeRepositoryOSV(r git.GitRef, workpath string) (res Result, err error) {
-	repoDir, err := git.Clone(r, workpath)
+func AnalyzeRepositoryOSV(r gitlib.GitRef, workpath string) (res Result, err error) {
+	repoDir, err := gitlib.Clone(r, workpath)
 	if err != nil {
 		return
 	}

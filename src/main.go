@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/sandrolain/gomsvc/pkg/datalib"
+	"github.com/sandrolain/gomsvc/pkg/gitlib"
 	"github.com/sandrolain/gomsvc/pkg/svc"
-	"github.com/sandrolain/podsec-monitor/src/internal/git"
 	"github.com/sandrolain/podsec-monitor/src/internal/grype"
 	"github.com/sandrolain/podsec-monitor/src/models"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -278,8 +278,8 @@ func LoadGrypeJson(filePath string) (res grype.Result, err error) {
 	return
 }
 
-func AnalyzeRepository(r git.GitRef, workpath string, filePath string) (res grype.Result, err error) {
-	repoDir, err := git.Clone(r, workpath)
+func AnalyzeRepository(r gitlib.GitRef, workpath string, filePath string) (res grype.Result, err error) {
+	repoDir, err := gitlib.Clone(r, workpath)
 	if err != nil {
 		return
 	}

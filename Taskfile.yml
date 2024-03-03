@@ -3,7 +3,7 @@ version: "3"
 tasks:
   build-image:
     cmds:
-      - docker build -t "podsec:latest" -f "./.Dockerfile" .
+      - docker build -t "podsec:latest" .
       - docker image prune -f
       - docker volume prune -f
 
