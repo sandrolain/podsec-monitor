@@ -19,5 +19,6 @@ tasks:
     env:
       WORKDIR_PATH: ./out
       NAMESPACES: mongodb
+      LOG_LEVEL: debug
     cmds:
       - go run ./src

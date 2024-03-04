@@ -6,20 +6,19 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"html"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/sandrolain/gomsvc/pkg/datalib"
 	"github.com/sandrolain/gomsvc/pkg/gitlib"
 	"github.com/sandrolain/gomsvc/pkg/svc"
+	"github.com/sandrolain/podsec-monitor/src/internal/cache"
 	"github.com/sandrolain/podsec-monitor/src/internal/grype"
+	"github.com/sandrolain/podsec-monitor/src/internal/mail"
 	"github.com/sandrolain/podsec-monitor/src/models"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -33,9 +32,14 @@ func main() {
 		Name:    "podsec-monitor",
 		Version: "1.0.0",
 	}, func(cfg models.Config) {
-		outPath := cfg.WorkdirPath
+		l := svc.Logger()
+
 		namespaces := cfg.Namespaces
 		minSeverity := cfg.MinSeverity
+		cacheTime := cfg.CacheTime
+
+		outPath := svc.PanicWithError(filepath.Abs(cfg.WorkdirPath))
+		l.Debug("Output path", "path", outPath)
 
 		nsSet := datalib.NewSet[string]()
 		nsSet.Append(namespaces...)
@@ -44,7 +48,10 @@ func main() {
 		dirPath := path.Join(outPath, dirName)
 		svc.PanicIfError(os.MkdirAll(dirPath, os.ModePerm))
 
-		l := svc.Logger()
+		cachePath := path.Join(outPath, "cache")
+		l.Debug("Cache path", "path", cachePath)
+
+		procCache := svc.PanicWithError(cache.Init(cachePath))
 
 		config, err := rest.InClusterConfig()
 
@@ -68,7 +75,7 @@ func main() {
 		l.Info("Namespaces to process", "namespaces", namespaces)
 		l.Info("Pods in the cluster", "num", len(pods.Items))
 
-		images := datalib.NewSet[string]()
+		processedImages := map[string]string{}
 
 		results := []grype.Result{}
 
@@ -76,33 +83,58 @@ func main() {
 			for _, cnt := range pod.Spec.Containers {
 				if nsSet.Contains(pod.Namespace) {
 					image := cnt.Image
-					l.Info("Container", "pod", pod.Name, "container", cnt.Name, "image", image)
 
-					if images.Contains(image) {
-						l.Info("Image already processed", "image", image)
+					imageID := ""
+					for _, sts := range pod.Status.ContainerStatuses {
+						if sts.Name == cnt.Name {
+							imageID = sts.ImageID
+						}
+					}
+
+					if imageID == "" {
+						imageID = image
+					}
+
+					imageID = strings.Replace(imageID, "docker-pullable://", "", -1)
+
+					l.Info("Container", "pod", pod.Name, "container", cnt.Name, "image", image, "imageID", imageID)
+
+					if _, proc := processedImages[imageID]; proc {
+						l.Info("Image already processed", "image", image, "imageID", imageID)
 					} else {
+						cacheVal, err := procCache.Get(imageID)
+						if err == nil && cacheVal != "" {
+							l.Info("Image already in cache", "image", image, "imageID", imageID)
+							processedImages[imageID] = image
+							continue
+						}
+
 						l.Info("Processing image", "image", image)
 
-						fileName := svc.PanicWithError(datalib.SafeFilename(image, "json"))
+						fileName := svc.PanicWithError(datalib.SafeFilename(imageID, "json"))
 						filePath := path.Join(dirPath, fileName)
 
-						res, err := AnalyzeImage(image, filePath)
+						res, err := AnalyzeImage(imageID, filePath)
 
 						if err != nil {
-							svc.Error("Error Analyze with Grype", err, "image", image, "filePath", filePath)
+							svc.Error("Error Analyze with Grype", err, "image", image, "imageID", imageID, "filePath", filePath)
 							continue
 						}
 
 						vulNum := len(res.Matches)
 
-						l.Info("Image processed", "image", image, "vulnerabilities", vulNum)
+						l.Info("Image processed", "image", image, "imageID", imageID, "vulnerabilities", vulNum)
 
-						// if vulNum > 0 {
-						// 	devlib.P(res)
-						// }
 						results = append(results, res)
+
+						processedImages[imageID] = image
+
+						err = procCache.Set(imageID, image, cacheTime)
+
+						if err != nil {
+							svc.Error("Error cache image", err, "image", image, "imageID", imageID)
+						}
 					}
-					images.Add(image)
 				}
 			}
 		}
@@ -114,130 +146,14 @@ func main() {
 
 		l.Info("Finished", "totalImages", len(results), "totalVulnerabilities", totalVul)
 
-		severityScores := map[string]int{
-			"Unknown":    0,
-			"Negligible": 1,
-			"Low":        2,
-			"Medium":     3,
-			"High":       4,
-			"Critical":   5,
-		}
-
-		severityEmojii := map[string]string{
-			"Unknown":    "❓",
-			"Negligible": "ℹ️",
-			"Low":        "🩹",
-			"Medium":     "⚠️",
-			"High":       "🚨",
-			"Critical":   "🔥",
-		}
-
-		tables := make([]string, len(results))
-
-		for i, result := range results {
-			matches := result.Matches
-
-			sort.Slice(matches, func(i, j int) bool {
-				if matches[i].Vulnerability.Severity == matches[j].Vulnerability.Severity {
-					return matches[i].Vulnerability.Id < matches[j].Vulnerability.Id
-				}
-				return severityScores[matches[i].Vulnerability.Severity] > severityScores[matches[j].Vulnerability.Severity]
-			})
-
-			matches = slices.DeleteFunc(matches, func(match grype.Match) bool {
-				sev := severityScores[match.Vulnerability.Severity]
-				return sev < minSeverity
-			})
-
-			table := fmt.Sprintf(`
-			<h3>%s<br>%s</h3>
-			<table class="data-table"><thead>
-				<tr><th>Severity</th><th>Vul ID</th><th>Package</th><th>Version</th><th>Type</th></tr>
-			</thead><tbody>`, result.Source.Target.UserInput, result.Source.Target.ImageID)
-
-			for _, res := range matches {
-				severity := res.Vulnerability.Severity
-				emo := severityEmojii[severity]
-
-				table += fmt.Sprintf("<tr><td>%s %s</td>", emo, html.EscapeString(severity))
-				table += fmt.Sprintf("<td><a href=\"%s\">%s</a></td>", html.EscapeString(res.Vulnerability.DataSource), html.EscapeString(res.Vulnerability.Id))
-				table += fmt.Sprintf("<td>%s</td>", html.EscapeString(res.Artifact.Name))
-				table += fmt.Sprintf("<td>%s</td>", html.EscapeString(res.Artifact.Version))
-				table += fmt.Sprintf("<td>%s</td></tr>", html.EscapeString(res.Artifact.Type))
-			}
-
-			table += "</tbody></table>"
-
-			tables[i] = table
-		}
-
-		reportTables := MailHtml(strings.Join(tables, ""))
+		reportTables := mail.GenerateMail(results, processedImages, minSeverity)
 
 		os.WriteFile("report.html", []byte(reportTables), 0644)
 
+		os.RemoveAll(dirPath)
+
 		svc.Exit(0)
 	})
-
-}
-
-func MailHtml(body string) string {
-	return `
-	<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
-	<html xmlns="http://www.w3.org/1999/xhtml">
-	<head>
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-		<style type="text/css" rel="stylesheet" media="all">
-		*:not(br):not(tr):not(html) {
-			font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif;
-			-webkit-box-sizing: border-box;
-			box-sizing: border-box;
-		}
-		body {
-			width: 100% !important;
-			height: 100%;
-			margin: 0;
-			line-height: 1.4;
-			background-color: #FFFFFF;
-			-webkit-text-size-adjust: none;
-			font-size: 12px;
-		}
-		a {
-			color: #3869D4;
-		}
-		h3 {
-			font-size: 14px
-		}
-		.data-table {
-			font-size: 12px;
-      width: 100%;
-      margin: 0;
-      border-spacing: 0;
-      border-collapse: collapse;
-			background-color: #FFFFFF;
-    }
-    .data-table th {
-      text-align: left;
-      padding: 0px 5px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid #EDEFF2;
-    }
-    .data-table td {
-      padding: 10px 5px;
-      font-size: 12px;
-      line-height: 12px;
-      border: 1px solid #EDEFF2;
-      white-space: nowrap;
-    }
-    .data-table tr:nth-child(odd) td {
-      background-color: #F4F4F7;
-    }
-		</style>
-		<table class="email-body_inner" align="center" width="570" cellpadding="0" cellspacing="0">
-    <tr><td>` + body + `</td></tr></table>
-		</body>
-		</html>
-		`
 
 }
 
