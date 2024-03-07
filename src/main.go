@@ -35,7 +35,6 @@ func main() {
 		l := svc.Logger()
 
 		namespaces := cfg.Namespaces
-		minSeverity := cfg.MinSeverity
 		cacheTime := cfg.CacheTime
 
 		outPath := svc.PanicWithError(filepath.Abs(cfg.WorkdirPath))
@@ -77,6 +76,7 @@ func main() {
 
 		processedImages := map[string]string{}
 
+		resultFiles := []string{}
 		results := []grype.Result{}
 
 		for _, pod := range pods.Items {
@@ -126,6 +126,7 @@ func main() {
 						l.Info("Image processed", "image", image, "imageID", imageID, "vulnerabilities", vulNum)
 
 						results = append(results, res)
+						resultFiles = append(resultFiles, filePath)
 
 						processedImages[imageID] = image
 
@@ -139,6 +140,11 @@ func main() {
 			}
 		}
 
+		if len(results) == 0 {
+			l.Info("No images scanned")
+			svc.Exit(0)
+		}
+
 		totalVul := 0
 		for _, res := range results {
 			totalVul += len(res.Matches)
@@ -146,9 +152,24 @@ func main() {
 
 		l.Info("Finished", "totalImages", len(results), "totalVulnerabilities", totalVul)
 
-		reportTables := mail.GenerateMail(results, processedImages, minSeverity)
+		html := svc.PanicWithError(mail.GenerateMail(cfg, results, processedImages))
 
-		os.WriteFile("report.html", []byte(reportTables), 0644)
+		os.WriteFile("report.html", []byte(html), 0644)
+
+		err = mail.SendEmail(mail.SendMailArgs{
+			Subject:  "Podsec Report",
+			Body:     html,
+			To:       cfg.SmtpTo,
+			From:     cfg.SmtpFrom,
+			Host:     cfg.SmtpHost,
+			Port:     cfg.SmtpPort,
+			Username: cfg.SmtpUsername,
+			Password: cfg.SmtpPassword,
+			Files:    resultFiles,
+		})
+		if err != nil {
+			svc.Error("Error sending email", err)
+		}
 
 		os.RemoveAll(dirPath)
 

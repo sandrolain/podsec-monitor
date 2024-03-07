@@ -20,5 +20,16 @@ tasks:
       WORKDIR_PATH: ./out
       NAMESPACES: mongodb
       LOG_LEVEL: debug
+      CACHE_TIME: 60
+      SMTP_HOST: localhost
+      SMTP_PORT: 1025
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      SMTP_FROM: "test@example.com"
+      SMTP_TO: "test@example.com"
     cmds:
       - go run ./src
+
+  mailpit:
+    cmds:
+      - docker run -d --restart unless-stopped --name=mailpit -p 8025:8025 -p 1025:1025 axllent/mailpit

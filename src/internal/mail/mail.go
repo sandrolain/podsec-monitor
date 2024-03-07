@@ -9,9 +9,12 @@ import (
 
 	"github.com/sandrolain/podsec-monitor/src/internal/grype"
 	"github.com/sandrolain/podsec-monitor/src/internal/severity"
+	"github.com/sandrolain/podsec-monitor/src/models"
+	"github.com/vanng822/go-premailer/premailer"
+	"github.com/wneessen/go-mail"
 )
 
-func GenerateMail(results []grype.Result, processedImages map[string]string, minSeverity int) string {
+func GenerateMail(cfg models.Config, results []grype.Result, processedImages map[string]string) (res string, err error) {
 	tables := make([]string, len(results))
 
 	for i, result := range results {
@@ -25,8 +28,14 @@ func GenerateMail(results []grype.Result, processedImages map[string]string, min
 		})
 
 		matches = slices.DeleteFunc(matches, func(match grype.Match) bool {
-			return severity.GetSeverityIndex(match.Vulnerability.Severity) < minSeverity
+			return severity.GetSeverityIndex(match.Vulnerability.Severity) < cfg.MinSeverity
 		})
+
+		rest := 0
+		if cfg.VulnLimit > 0 && len(matches) > cfg.VulnLimit {
+			rest = len(matches) - cfg.VulnLimit
+			matches = matches[:cfg.VulnLimit]
+		}
 
 		imageWithTag, ok := processedImages[result.Source.Target.UserInput]
 		if !ok {
@@ -48,12 +57,24 @@ func GenerateMail(results []grype.Result, processedImages map[string]string, min
 			table += fmt.Sprintf("<td>%s</td></tr>", html.EscapeString(res.Artifact.Type))
 		}
 
+		if rest > 0 {
+			table += fmt.Sprintf("<tr><td colspan=\"5\">%d more vulnerabilities</td></tr>", rest)
+		}
+
 		table += "</tbody></table>"
 
 		tables[i] = table
 	}
 
-	return mailHtml(strings.Join(tables, ""))
+	html := mailHtml(strings.Join(tables, ""))
+
+	prem, err := premailer.NewPremailerFromString(html, premailer.NewOptions())
+	if err != nil {
+		return
+	}
+
+	res, err = prem.Transform()
+	return
 }
 
 func mailHtml(body string) string {
@@ -115,4 +136,54 @@ func mailHtml(body string) string {
 		</html>
 		`
 
+}
+
+type SendMailArgs struct {
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
+	To       []string
+	Subject  string
+	Body     string
+	Files    []string
+}
+
+func SendEmail(args SendMailArgs) (err error) {
+	m := mail.NewMsg()
+	if err = m.From(args.From); err != nil {
+		return
+	}
+	if err = m.To(args.To...); err != nil {
+		return
+	}
+	m.Subject(args.Subject)
+	m.SetBodyString(mail.TypeTextHTML, args.Body)
+
+	for _, file := range args.Files {
+		m.AttachFile(file)
+	}
+
+	opts := []mail.Option{}
+
+	//opts = append(opts, mail.WithSMTPAuth(mail.SMTPAuthPlain))
+	opts = append(opts, mail.WithTLSPortPolicy(mail.NoTLS))
+	opts = append(opts, mail.WithPort(args.Port))
+
+	if args.Username != "" {
+		opts = append(opts, mail.WithUsername(args.Username))
+	}
+	if args.Password != "" {
+		opts = append(opts, mail.WithPassword(args.Password))
+	}
+
+	c, err := mail.NewClient(args.Host, opts...)
+	if err != nil {
+		return
+	}
+
+	err = c.DialAndSend(m)
+
+	return
 }
