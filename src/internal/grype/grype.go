@@ -2,12 +2,27 @@ package grype
 
 type Result struct {
 	Matches []Match `json:"matches"`
-	Source  Source  `json:"source"`
+	Target  Target  `json:"target"`
 }
 
-type Source struct {
+type ImageResult struct {
+	Matches []Match     `json:"matches"`
+	Source  ImageSource `json:"source"`
+}
+
+type ImageSource struct {
 	Type   string `json:"type"`
 	Target Target `json:"target"`
+}
+
+type DirResult struct {
+	Matches []Match   `json:"matches"`
+	Source  DirSource `json:"source"`
+}
+
+type DirSource struct {
+	Type   string `json:"type"`
+	Target string `json:"target"`
 }
 
 type Target struct {

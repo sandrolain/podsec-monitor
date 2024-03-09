@@ -1,24 +1,22 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"flag"
-	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sandrolain/gomsvc/pkg/datalib"
-	"github.com/sandrolain/gomsvc/pkg/gitlib"
 	"github.com/sandrolain/gomsvc/pkg/svc"
 	"github.com/sandrolain/podsec-monitor/src/internal/cache"
 	"github.com/sandrolain/podsec-monitor/src/internal/grype"
 	"github.com/sandrolain/podsec-monitor/src/internal/mail"
+	"github.com/sandrolain/podsec-monitor/src/internal/severity"
 	"github.com/sandrolain/podsec-monitor/src/models"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -40,8 +38,8 @@ func main() {
 		outPath := svc.PanicWithError(filepath.Abs(cfg.WorkdirPath))
 		l.Debug("Output path", "path", outPath)
 
-		nsSet := datalib.NewSet[string]()
-		nsSet.Append(namespaces...)
+		resultFiles := []string{}
+		results := []grype.Result{}
 
 		dirName := time.Now().Format("20060102_150405")
 		dirPath := path.Join(outPath, dirName)
@@ -52,123 +50,149 @@ func main() {
 
 		procCache := svc.PanicWithError(cache.Init(cachePath))
 
-		config, err := rest.InClusterConfig()
-
-		if err == rest.ErrNotInCluster {
-			var kubeconfig *string
-			if home := homedir.HomeDir(); home != "" {
-				kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-			} else {
-				kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-			}
-			flag.Parse()
-			config = svc.PanicWithError(clientcmd.BuildConfigFromFlags("", *kubeconfig))
-		} else {
-			svc.PanicIfError(err)
-		}
-
-		clientset := svc.PanicWithError(kubernetes.NewForConfig(config))
-
-		pods := svc.PanicWithError(clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{}))
-
-		l.Info("Namespaces to process", "namespaces", namespaces)
-		l.Info("Pods in the cluster", "num", len(pods.Items))
-
 		processedImages := map[string]string{}
 
-		resultFiles := []string{}
-		results := []grype.Result{}
+		if len(namespaces) > 0 {
+			nsSet := datalib.NewSet[string]()
+			nsSet.Append(namespaces...)
 
-		for _, pod := range pods.Items {
-			for _, cnt := range pod.Spec.Containers {
-				if nsSet.Contains(pod.Namespace) {
-					image := cnt.Image
+			config, err := rest.InClusterConfig()
 
-					imageID := ""
-					for _, sts := range pod.Status.ContainerStatuses {
-						if sts.Name == cnt.Name {
-							imageID = sts.ImageID
-						}
-					}
+			if err == rest.ErrNotInCluster {
+				var kubeconfig *string
+				if home := homedir.HomeDir(); home != "" {
+					kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+				} else {
+					kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+				}
+				flag.Parse()
+				config = svc.PanicWithError(clientcmd.BuildConfigFromFlags("", *kubeconfig))
+			} else {
+				svc.PanicIfError(err)
+			}
 
-					if imageID == "" {
-						imageID = image
-					}
+			clientset := svc.PanicWithError(kubernetes.NewForConfig(config))
 
-					imageID = strings.Replace(imageID, "docker-pullable://", "", -1)
+			pods := svc.PanicWithError(clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{}))
 
-					l.Info("Container", "pod", pod.Name, "container", cnt.Name, "image", image, "imageID", imageID)
+			l.Info("Namespaces to process", "namespaces", namespaces)
+			l.Info("Pods in the cluster", "num", len(pods.Items))
 
-					if _, proc := processedImages[imageID]; proc {
-						l.Info("Image already processed", "image", image, "imageID", imageID)
-					} else {
-						cacheVal, err := procCache.Get(imageID)
-						if err == nil && cacheVal != "" {
-							l.Info("Image already in cache", "image", image, "imageID", imageID)
-							processedImages[imageID] = image
-							continue
-						}
+			for _, pod := range pods.Items {
+				for _, cnt := range pod.Spec.Containers {
+					if nsSet.Contains(pod.Namespace) {
+						image := cnt.Image
 
-						l.Info("Processing image", "image", image)
-
-						fileName := svc.PanicWithError(datalib.SafeFilename(imageID, "json"))
-						filePath := path.Join(dirPath, fileName)
-
-						res, err := AnalyzeImage(imageID, filePath)
-
-						if err != nil {
-							svc.Error("Error Analyze with Grype", err, "image", image, "imageID", imageID, "filePath", filePath)
-							continue
+						imageID := ""
+						for _, sts := range pod.Status.ContainerStatuses {
+							if sts.Name == cnt.Name {
+								imageID = sts.ImageID
+							}
 						}
 
-						vulNum := len(res.Matches)
+						if imageID == "" {
+							imageID = image
+						}
 
-						l.Info("Image processed", "image", image, "imageID", imageID, "vulnerabilities", vulNum)
+						imageID = strings.Replace(imageID, "docker-pullable://", "", -1)
 
-						results = append(results, res)
-						resultFiles = append(resultFiles, filePath)
+						l.Info("Container", "pod", pod.Name, "container", cnt.Name, "image", image, "imageID", imageID)
 
-						processedImages[imageID] = image
-
-						err = procCache.Set(imageID, image, cacheTime)
-
-						if err != nil {
-							svc.Error("Error cache image", err, "image", image, "imageID", imageID)
+						if _, proc := processedImages[imageID]; proc {
+							l.Info("Image already processed", "image", image, "imageID", imageID)
+						} else {
+							res, filePath, err := ProcessImage(dirPath, procCache, cacheTime, imageID, image, processedImages)
+							if err != nil {
+								svc.Error("Failed to process image", err, "image", image, "imageID", imageID)
+							} else {
+								results = append(results, res)
+								resultFiles = append(resultFiles, filePath)
+							}
 						}
 					}
 				}
 			}
+
+			l.Info("All images processed", "num", len(results))
 		}
 
-		if len(results) == 0 {
-			l.Info("No images scanned")
-			svc.Exit(0)
+		if len(cfg.Directories) > 0 {
+			for _, dir := range cfg.Directories {
+				image := "dir:" + path.Join(outPath, dir)
+				imageID := image
+				res, filePath, err := ProcessImage(dirPath, procCache, cacheTime, imageID, image, processedImages)
+				if err != nil {
+					svc.Error("Failed to process directory", err, "directory", dir)
+				} else {
+					results = append(results, res)
+					resultFiles = append(resultFiles, filePath)
+				}
+			}
 		}
 
-		totalVul := 0
-		for _, res := range results {
-			totalVul += len(res.Matches)
+		mailResults := []mail.MailResult{}
+
+		for _, result := range results {
+			matches := result.Matches
+
+			sort.Slice(matches, func(i, j int) bool {
+				if matches[i].Vulnerability.Severity == matches[j].Vulnerability.Severity {
+					return matches[i].Vulnerability.Id < matches[j].Vulnerability.Id
+				}
+				return severity.GetSeverityIndex(matches[i].Vulnerability.Severity) > severity.GetSeverityIndex(matches[j].Vulnerability.Severity)
+			})
+
+			matches = slices.DeleteFunc(matches, func(match grype.Match) bool {
+				return severity.GetSeverityIndex(match.Vulnerability.Severity) < cfg.MinSeverity
+			})
+
+			rest := 0
+			if cfg.VulnLimit > 0 && len(matches) > cfg.VulnLimit {
+				rest = len(matches) - cfg.VulnLimit
+				matches = matches[:cfg.VulnLimit]
+			}
+
+			result.Matches = matches
+
+			if len(matches) == 0 {
+				continue
+			}
+
+			mailResults = append(mailResults, mail.MailResult{
+				Rest:   rest,
+				Result: result,
+			})
 		}
 
-		l.Info("Finished", "totalImages", len(results), "totalVulnerabilities", totalVul)
+		if len(mailResults) > 0 {
+			totalVul := 0
+			for _, res := range results {
+				totalVul += len(res.Matches)
+			}
 
-		html := svc.PanicWithError(mail.GenerateMail(cfg, results, processedImages))
+			l.Info("Finished", "totalImages", len(results), "totalVulnerabilities", totalVul)
 
-		os.WriteFile("report.html", []byte(html), 0644)
-
-		err = mail.SendEmail(mail.SendMailArgs{
-			Subject:  "Podsec Report",
-			Body:     html,
-			To:       cfg.SmtpTo,
-			From:     cfg.SmtpFrom,
-			Host:     cfg.SmtpHost,
-			Port:     cfg.SmtpPort,
-			Username: cfg.SmtpUsername,
-			Password: cfg.SmtpPassword,
-			Files:    resultFiles,
-		})
-		if err != nil {
-			svc.Error("Error sending email", err)
+			html, err := mail.GenerateMail(cfg, mailResults, processedImages)
+			if err != nil {
+				svc.Error("Error generating email", err)
+			} else {
+				err = mail.SendEmail(mail.SendMailArgs{
+					Subject:  "Podsec Report",
+					Body:     html,
+					To:       cfg.SmtpTo,
+					From:     cfg.SmtpFrom,
+					Host:     cfg.SmtpHost,
+					Port:     cfg.SmtpPort,
+					Username: cfg.SmtpUsername,
+					Password: cfg.SmtpPassword,
+					Files:    resultFiles,
+				})
+				if err != nil {
+					svc.Error("Error sending email", err)
+				}
+			}
+		} else {
+			l.Info("No new vulnerabilities")
 		}
 
 		os.RemoveAll(dirPath)
@@ -178,47 +202,35 @@ func main() {
 
 }
 
-func AnalyzeImage(image string, filePath string) (res grype.Result, err error) {
-	cmd := exec.Command("grype", image, "-o", "json", "--file", filePath, "--add-cpes-if-none")
-	cmdReader, err := cmd.StdoutPipe()
-	if err != nil {
+func ProcessImage(dirPath string, procCache *cache.Cache, cacheTime uint32, imageID string, image string, processedImages map[string]string) (res grype.Result, filePath string, err error) {
+	l := svc.Logger()
+	cacheVal, err := procCache.Get(imageID)
+	if err == nil && cacheVal != "" {
+		l.Info("Resource already in cache", "image", image, "imageID", imageID)
+		processedImages[imageID] = image
 		return
 	}
 
-	scanner := bufio.NewScanner(cmdReader)
-	go func() {
-		for scanner.Scan() {
-			fmt.Println(scanner.Text())
-		}
-	}()
+	l.Info("Processing resource", "resource", image)
 
-	err = cmd.Start()
+	fileName := svc.PanicWithError(datalib.SafeFilename(imageID, "json"))
+	filePath = path.Join(dirPath, fileName)
+
+	res, err = grype.Analyze(imageID, filePath)
+
 	if err != nil {
+		svc.Error("Error Analyze with Grype", err, "image", image, "imageID", imageID, "filePath", filePath)
 		return
 	}
 
-	err = cmd.Wait()
-	if err != nil {
-		return
-	}
+	vulNum := len(res.Matches)
 
-	res, err = LoadGrypeJson(filePath)
+	l.Info("Image processed", "image", image, "imageID", imageID, "vulnerabilities", vulNum)
+
+	processedImages[imageID] = image
+
+	if err := procCache.Set(imageID, image, cacheTime); err != nil {
+		svc.Error("Error cache image", err, "image", image, "imageID", imageID)
+	}
 	return
-}
-
-func LoadGrypeJson(filePath string) (res grype.Result, err error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return
-	}
-	err = json.Unmarshal(data, &res)
-	return
-}
-
-func AnalyzeRepository(r gitlib.GitRef, workpath string, filePath string) (res grype.Result, err error) {
-	repoDir, err := gitlib.Clone(r, workpath)
-	if err != nil {
-		return
-	}
-	return AnalyzeImage(fmt.Sprintf("dir:%s", repoDir), filePath)
 }

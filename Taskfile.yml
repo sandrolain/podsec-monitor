@@ -18,7 +18,7 @@ tasks:
   run:
     env:
       WORKDIR_PATH: ./out
-      NAMESPACES: mongodb
+      NAMESPACES: redis,mongodb
       LOG_LEVEL: debug
       CACHE_TIME: 60
       SMTP_HOST: localhost
@@ -28,6 +28,22 @@ tasks:
       SMTP_FROM: "test@example.com"
       SMTP_TO: "test@example.com"
     cmds:
+      - go run ./src
+
+  run-dir:
+    env:
+      WORKDIR_PATH: ./out
+      DIRECTORIES: podsec-monitor
+      LOG_LEVEL: debug
+      CACHE_TIME: 60
+      SMTP_HOST: localhost
+      SMTP_PORT: 1025
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      SMTP_FROM: "test@example.com"
+      SMTP_TO: "test@example.com"
+    cmds:
+      #- git clone https://github.com/sandrolain/podsec-monitor ./out/podsec-monitor
       - go run ./src
 
   mailpit:

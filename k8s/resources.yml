@@ -91,7 +91,7 @@ spec:
                 - name: WORKDIR_PATH
                   value: /workdir
                 - name: NAMESPACES
-                  value: mongodb
+                  value: tools
           restartPolicy: Never
           volumes:
             - name: podsec-volume

@@ -3,8 +3,6 @@ package mail
 import (
 	"fmt"
 	"html"
-	"slices"
-	"sort"
 	"strings"
 
 	"github.com/sandrolain/podsec-monitor/src/internal/grype"
@@ -14,39 +12,28 @@ import (
 	"github.com/wneessen/go-mail"
 )
 
-func GenerateMail(cfg models.Config, results []grype.Result, processedImages map[string]string) (res string, err error) {
+type MailResult struct {
+	Rest   int
+	Result grype.Result
+}
+
+func GenerateMail(cfg models.Config, results []MailResult, processedImages map[string]string) (res string, err error) {
 	tables := make([]string, len(results))
 
-	for i, result := range results {
+	for i, item := range results {
+		result := item.Result
 		matches := result.Matches
 
-		sort.Slice(matches, func(i, j int) bool {
-			if matches[i].Vulnerability.Severity == matches[j].Vulnerability.Severity {
-				return matches[i].Vulnerability.Id < matches[j].Vulnerability.Id
-			}
-			return severity.GetSeverityIndex(matches[i].Vulnerability.Severity) > severity.GetSeverityIndex(matches[j].Vulnerability.Severity)
-		})
-
-		matches = slices.DeleteFunc(matches, func(match grype.Match) bool {
-			return severity.GetSeverityIndex(match.Vulnerability.Severity) < cfg.MinSeverity
-		})
-
-		rest := 0
-		if cfg.VulnLimit > 0 && len(matches) > cfg.VulnLimit {
-			rest = len(matches) - cfg.VulnLimit
-			matches = matches[:cfg.VulnLimit]
-		}
-
-		imageWithTag, ok := processedImages[result.Source.Target.UserInput]
+		imageWithTag, ok := processedImages[result.Target.UserInput]
 		if !ok {
-			imageWithTag = result.Source.Target.UserInput
+			imageWithTag = result.Target.UserInput
 		}
 
 		table := fmt.Sprintf(`
 			<h3>%s<br>%s<br>%s</h3>
 			<table class="data-table"><thead>
 				<tr><th>Severity</th><th>Vul ID</th><th>Package</th><th>Version</th><th>Type</th></tr>
-			</thead><tbody>`, imageWithTag, result.Source.Target.UserInput, result.Source.Target.ImageID)
+			</thead><tbody>`, imageWithTag, result.Target.UserInput, result.Target.ImageID)
 
 		for _, res := range matches {
 			sev := res.Vulnerability.Severity
@@ -57,8 +44,8 @@ func GenerateMail(cfg models.Config, results []grype.Result, processedImages map
 			table += fmt.Sprintf("<td>%s</td></tr>", html.EscapeString(res.Artifact.Type))
 		}
 
-		if rest > 0 {
-			table += fmt.Sprintf("<tr><td colspan=\"5\">%d more vulnerabilities</td></tr>", rest)
+		if item.Rest > 0 {
+			table += fmt.Sprintf("<tr><td colspan=\"5\">%d more vulnerabilities</td></tr>", item.Rest)
 		}
 
 		table += "</tbody></table>"

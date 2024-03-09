@@ -2,7 +2,7 @@ module github.com/sandrolain/podsec-monitor
 
 replace github.com/sandrolain/gomsvc => ./gomsvc
 
-go 1.21.5
+go 1.22.1
 
 require (
 	github.com/nutsdb/nutsdb v1.0.4
